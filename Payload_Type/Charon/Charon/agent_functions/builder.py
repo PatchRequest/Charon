@@ -9,7 +9,7 @@ import os
 
 class CharonAgent(PayloadType):
     name = "Charon"
-    file_extension = "txt"
+    file_extension = "exe"
     author = "@PatchRequest"
     supported_os = [SupportedOS.Windows]
     wrapper = False
