@@ -16,7 +16,7 @@ class CharonAgent(PayloadType):
     wrapped_payloads = []
     note = "In-memory loader — PowerShell one-liner with .NET RunPE stager for fileless execution"
     supports_dynamic_loading = False
-    c2_profiles = ["http"]
+    c2_profiles = []
     mythic_encrypts = False
     translation_container = None
     build_parameters = [
