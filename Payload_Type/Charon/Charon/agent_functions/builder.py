@@ -30,7 +30,7 @@ class CharonAgent(PayloadType):
             name="spawn_process",
             parameter_type=BuildParameterType.String,
             description="Sacrificial process for RunPE process hollowing",
-            default_value=r"C:\Windows\System32\svchost.exe",
+            default_value=r"C:\Windows\System32\notepad.exe",
         ),
     ]
     agent_path = pathlib.Path(".") / "Charon"
